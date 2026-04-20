@@ -1,0 +1,123 @@
+pipeline:
+  name: CI-16621 DotNet Multi-Project Cache Intelligence
+  identifier: ci16621_dotnet_cache_intelligence
+  orgIdentifier: default
+  projectIdentifier: Drone_Plugins
+  properties:
+    ci:
+      codebase:
+        connectorRef: GitHub_Drone_Plugins_Org   # replace with your GitHub connector
+        repoName: multi-dot-net
+        build: <+input>
+  stages:
+    - stage:
+        name: Build and Cache
+        identifier: build_and_cache
+        type: CI
+        spec:
+          cloneCodebase: true
+          platform:
+            os: Linux
+            arch: Amd64
+          runtime:
+            type: Cloud
+            spec: {}
+          execution:
+            steps:
+
+              # ------------------------------------------------------------------
+              # STEP 1: Restore Cache
+              # auto_detect=true → plugin scans for *.csproj files, determines
+              # the common ancestor directory, and restores .nuget/packages from
+              # the cache backend.
+              # ------------------------------------------------------------------
+              - step:
+                  type: Plugin
+                  name: Restore Cache
+                  identifier: restore_cache
+                  spec:
+                    connectorRef: Plugins_Docker_Hub_Connector
+                    image: plugins/cache:linux-amd64
+                    settings:
+                      backend: s3
+                      bucket: drone-cache-bucket
+                      region: us-east-1
+                      auto_detect: true
+                      restore: true
+                      exit_code: true
+                    envVariables:
+                      AWS_ACCESS_KEY_ID: <+secrets.getValue("aws_access_key_id")>
+                      AWS_SECRET_ACCESS_KEY: <+secrets.getValue("aws_secret_access_key")>
+                    imagePullPolicy: Always
+
+              # ------------------------------------------------------------------
+              # STEP 2: Verify nuget.config location (debug — remove in prod)
+              # With the fix, nuget.config must exist at the repo root (.) and
+              # globalPackagesFolder must point to <root>/.nuget/packages —
+              # covering ProjectA, ProjectB AND ProjectC-DataAccess.
+              # Without the fix, nuget.config would only exist inside ProjectB/.
+              # ------------------------------------------------------------------
+              - step:
+                  type: Run
+                  name: Verify nuget.config at repo root
+                  identifier: verify_nuget_config
+                  spec:
+                    connectorRef: Plugins_Docker_Hub_Connector
+                    image: mcr.microsoft.com/dotnet/sdk:8.0
+                    shell: Sh
+                    command: |-
+                      echo "=== nuget.config locations ==="
+                      find . -name "nuget.config" -not -path "*/obj/*" | sort
+
+                      echo ""
+                      echo "=== Contents of root nuget.config (if present) ==="
+                      cat nuget.config 2>/dev/null || echo "MISSING — fix not applied or restore did not create it"
+
+                      echo ""
+                      echo "=== Expected: globalPackagesFolder at repo root ==="
+                      grep -r "globalPackagesFolder" . --include="nuget.config" || echo "globalPackagesFolder not set"
+
+              # ------------------------------------------------------------------
+              # STEP 3: dotnet restore + build
+              # NuGet resolves packages from .nuget/packages at the repo root
+              # (set by nuget.config). All three projects share this one location.
+              # ------------------------------------------------------------------
+              - step:
+                  type: Run
+                  name: dotnet build
+                  identifier: dotnet_build
+                  spec:
+                    connectorRef: Plugins_Docker_Hub_Connector
+                    image: mcr.microsoft.com/dotnet/sdk:8.0
+                    shell: Sh
+                    command: |-
+                      dotnet restore multi-dot-net.sln
+                      dotnet build multi-dot-net.sln --no-restore
+
+                      echo ""
+                      echo "=== NuGet packages cached at ==="
+                      ls -la .nuget/packages/ 2>/dev/null || echo "No packages at root — cache not wired correctly"
+
+              # ------------------------------------------------------------------
+              # STEP 4: Save Cache
+              # Saves .nuget/packages from the common ancestor (repo root) so
+              # the next run can restore all three projects' dependencies at once.
+              # ------------------------------------------------------------------
+              - step:
+                  type: Plugin
+                  name: Save Cache
+                  identifier: save_cache
+                  spec:
+                    connectorRef: Plugins_Docker_Hub_Connector
+                    image: plugins/cache:linux-amd64
+                    settings:
+                      backend: s3
+                      bucket: drone-cache-bucket
+                      region: us-east-1
+                      auto_detect: true
+                      rebuild: true
+                      exit_code: true
+                    envVariables:
+                      AWS_ACCESS_KEY_ID: <+secrets.getValue("aws_access_key_id")>
+                      AWS_SECRET_ACCESS_KEY: <+secrets.getValue("aws_secret_access_key")>
+                    imagePullPolicy: Always
