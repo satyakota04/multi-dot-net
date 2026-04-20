@@ -1,0 +1,12 @@
+## .NET build outputs
+bin/
+obj/
+.nuget/
+
+## NuGet
+*.nupkg
+nuget.config
+
+## OS
+.DS_Store
+Thumbs.db
